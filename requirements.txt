@@ -1,0 +1,8 @@
+streamlit==1.49.1
+chromadb
+sentence-transformers
+langchain
+langchain-community
+pypdf
+llama-cpp-python
+openai
