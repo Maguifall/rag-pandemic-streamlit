@@ -1,46 +1,108 @@
 import streamlit as st
-import traceback
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.prompts import PromptTemplate
+import requests
+import json
 
-# Bloc pour afficher les erreurs dans Streamlit
-try:
-    import chromadb
-    from sentence_transformers import SentenceTransformer
-except Exception as e:
-    st.error("Erreur au lancement de l'app :")
-    st.text(traceback.format_exc())
+# ------------------------
+# Config
+# ------------------------
+INDEX_DIR = "faiss_index"
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+MAX_TOKENS = 300
+MODEL_NAME = "llama3:8b"
+
+# ------------------------
+# Chargement embeddings et index FAISS
+# ------------------------
+embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+vectorstore = FAISS.load_local(INDEX_DIR, embeddings, allow_dangerous_deserialization=True)
+retriever = vectorstore.as_retriever(search_kwargs={"k": 4})  # plus de documents pour enrichir la réponse
+
+# ------------------------
+# Wrapper Ollama HTTP (réponse complète)
+# ------------------------
+def generate_complete(prompt: str, temperature=0.0, max_tokens=MAX_TOKENS):
+    payload = {
+        "model": MODEL_NAME,
+        "prompt": prompt,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+    try:
+        r = requests.post("http://localhost:11434/api/generate", json=payload, stream=True)
+        r.raise_for_status()
+        full_response = ""
+        for line in r.iter_lines():
+            if line:
+                try:
+                    data = json.loads(line.decode('utf-8'))
+                    text = data.get("response", "")
+                    if text:
+                        full_response += text
+                except json.JSONDecodeError:
+                    continue
+        return full_response
+    except requests.exceptions.RequestException as e:
+        return f"Error contacting Ollama API: {e}"
+
+# ------------------------
+# Prompt template amélioré
+# ------------------------
+TEMPLATE = """
+You are a domain expert in epidemiology and machine learning.
+Answer the QUESTION using **only** the provided CONTEXT.
+Provide a **detailed and structured explanation**, including:
+- Introduction to the concept
+- Technical description and mechanisms
+- Formulas or pseudo-code if relevant
+- Examples and applications
+- Any limitations mentioned in the context
+
+If the information is missing in the context, say explicitly that you don't know.
+
+QUESTION: {question}
+
+CONTEXT:
+{context}
+"""
+
+prompt_template = PromptTemplate(template=TEMPLATE, input_variables=["question", "context"])
+
+# ------------------------
+# Streamlit UI
+# ------------------------
+st.title("🦠 Pandemic RAG - Q&A (CPU, Detailed Responses)")
+st.write("Posez une question sur la pandémie ou la modélisation GNN/LSTM.")
+
+question = st.text_input("Votre question")
+if not question:
+    st.info("Entrez une question pour commencer.")
     st.stop()
 
-st.set_page_config(page_title="RAG Medical QA", page_icon="🩺")
-st.title("🩺 RAG Medical QA Assistant - Version légère")
+# ------------------------
+# Récupération contexte FAISS
+# ------------------------
+docs = retriever.get_relevant_documents(question)
+context_text = "\n".join([doc.page_content for doc in docs])
+prompt = prompt_template.format(question=question, context=context_text)
 
-# Constantes pour test
-DB_DIR = "chroma_db"
-EMB_MODEL = "all-MiniLM-L6-v2"  # modèle très léger pour test
+# ------------------------
+# Génération de la réponse complète
+# ------------------------
+st.subheader("Réponse")
+with st.spinner("Génération de la réponse…"):
+    answer = generate_complete(prompt)
+st.write(answer)
 
-@st.cache_resource
-def get_resources():
-    client = chromadb.PersistentClient(path=DB_DIR)
-    coll = client.get_or_create_collection("corpus")
-    emb = SentenceTransformer(EMB_MODEL)
-    return coll, emb
-
-coll, emb = get_resources()
-
-def retrieve(q, top_k=5):
-    q_vec = emb.encode([q], normalize_embeddings=True).tolist()
-    res = coll.query(query_embeddings=q_vec, n_results=top_k, include=["documents","metadatas"])
-    ctx_items = []
-    for doc, meta in zip(res["documents"][0], res["metadatas"][0]):
-        ctx_items.append((doc, meta))
-    return ctx_items
-
-user_q = st.text_input("Pose ta question médicale :")
-if user_q:
-    ctx = retrieve(user_q, top_k=5)
-    st.markdown("### 📄 Documents récupérés")
-    for i, (doc, meta) in enumerate(ctx, 1):
-        st.markdown(f"**[{i}]** {doc}\n(Source: {meta.get('source')}, page={meta.get('page')})")
-
-    # Réponse factice pour test frontend
-    st.markdown("### 📝 Réponse (test)")
-    st.write("Voici un exemple de réponse générée pour vérifier le frontend.")
+# ------------------------
+# Affichage sources
+# ------------------------
+st.subheader("Sources")
+seen = set()
+for doc in docs:
+    src = doc.metadata.get("source", "inconnu")
+    if src not in seen:
+        st.write(f"- {src}")
+        seen.add(src)

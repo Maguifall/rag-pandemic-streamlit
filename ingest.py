@@ -1,57 +1,68 @@
-# ingest.py
-import os, glob
-import chromadb
-from sentence_transformers import SentenceTransformer
-from langchain_community.document_loaders import PyPDFLoader
+import os
+from pathlib import Path
+from langchain.embeddings.huggingface import HuggingFaceEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.document_loaders import PyPDFLoader
+from langchain.vectorstores import FAISS
 
-DATA_DIR = "data"
-DB_DIR = "chroma_db"
-EMB_MODEL = "BAAI/bge-m3"  # ou "all-MiniLM-L6-v2" si tu veux plus léger
+# -----------------------------
+# Config
+# -----------------------------
+PDF_DIR = Path("data")
+FAISS_INDEX_PATH = "faiss_index"
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # léger & fiable
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 120
 
-def load_docs():
-    docs = []
-    pdf_files = glob.glob(os.path.join(DATA_DIR, "*.pdf"))
-    print(f"📂 {len(pdf_files)} PDF trouvés dans {DATA_DIR}")
-    for f in pdf_files:
-        loader = PyPDFLoader(f)
-        pages = loader.load()
-        print(f"📄 {len(pages)} pages dans {f}")
-        for page in pages:
-            docs.append({"text": page.page_content,
-                         "meta": {"source": f, "page": page.metadata.get("page", None)}})
-    print(f"✅ Total documents chargés : {len(docs)}")
-    return docs
+# -----------------------------
+# Vérifier l'existence du dossier PDFs
+# -----------------------------
+if not PDF_DIR.exists():
+    raise FileNotFoundError(f"Le dossier {PDF_DIR} n'existe pas. Créez-le et ajoutez vos PDFs.")
 
-def split_docs(docs):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-    chunks = []
+# Charger tous les PDFs
+pdf_files = list(PDF_DIR.glob("*.pdf"))
+print(f"{len(pdf_files)} fichiers PDF trouvés.")
+
+if not pdf_files:
+    raise FileNotFoundError("Aucun PDF trouvé dans ./data. Ajoutez des documents et réessayez.")
+
+# -----------------------------
+# Extraire les documents
+# -----------------------------
+documents = []
+for pdf in pdf_files:
+    loader = PyPDFLoader(str(pdf))
+    docs = loader.load()
     for d in docs:
-        splitted = splitter.split_text(d["text"])
-        for c in splitted:
-            chunks.append({"text": c, "meta": d["meta"]})
-    print(f"✂️ Total chunks créés : {len(chunks)}")
-    return chunks
+        # Ajouter la source comme metadata
+        d.metadata = d.metadata or {}
+        d.metadata["source"] = pdf.name
+    documents.extend(docs)
 
-def build_index(chunks):
-    if len(chunks) == 0:
-        print("⚠️ Aucun chunk à indexer, abandon de la construction de l'index.")
-        return
+print(f"{len(documents)} pages extraites.")
 
-    client = chromadb.PersistentClient(path=DB_DIR)
-    coll = client.get_or_create_collection("corpus")
-    print("⚡ Encodage des textes en embeddings…")
-    model = SentenceTransformer(EMB_MODEL)
-    texts = [c["text"] for c in chunks]
-    metas = [c["meta"] for c in chunks]
-    ids   = [f"id_{i}" for i in range(len(chunks))]
-    embs  = model.encode(texts, normalize_embeddings=True)
-    coll.add(ids=ids, embeddings=embs.tolist(), documents=texts, metadatas=metas)
-    print(f"✅ {len(chunks)} chunks indexés dans {DB_DIR}")
+# -----------------------------
+# Split into chunks
+# -----------------------------
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=CHUNK_OVERLAP,
+    separators=["\n\n", "\n", " ", ""]
+)
 
-if __name__ == "__main__":
-    print("🚀 Début de l'ingestion")
-    docs = load_docs()
-    chunks = split_docs(docs)
-    build_index(chunks)
-    print("🏁 Ingestion terminée")
+splits = text_splitter.split_documents(documents)
+print(f"{len(splits)} chunks générés.")
+
+# -----------------------------
+# Embeddings HuggingFace
+# -----------------------------
+embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+
+# -----------------------------
+# Créer et sauvegarder l'index FAISS
+# -----------------------------
+print("Création de l'index FAISS…")
+vectorstore = FAISS.from_documents(splits, embeddings)
+vectorstore.save_local(FAISS_INDEX_PATH)
+print("Index FAISS sauvegardé ✅")
