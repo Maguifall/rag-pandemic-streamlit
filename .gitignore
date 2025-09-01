@@ -1,0 +1,10 @@
+# Ignorer l'index FAISS
+faiss_index/
+
+# Ignorer la base Chroma
+chroma_db/
+
+# Ignorer les fichiers binaires et sqlite3 lourds
+*.bin
+*.sqlite3
+*.pkl
